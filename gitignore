@@ -1,0 +1,87 @@
+# ===========================
+# Environment & Secrets
+# ===========================
+.env
+*.env
+.env.*
+!.env.example
+
+# ===========================
+# Python
+# ===========================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+
+# ===========================
+# Virtual Environments
+# ===========================
+venv/
+.venv/
+env/
+.env/
+ENV/
+
+# ===========================
+# Audio & Media Files
+# ===========================
+*.mp3
+*.mp4
+*.wav
+*.m4a
+*.ogg
+*.flac
+uploads/
+temp/
+tmp/
+
+# ===========================
+# AI / Vector Store Cache
+# ===========================
+.chroma/
+chroma_db/
+faiss_index/
+*.pkl
+*.index
+embeddings_cache/
+
+# ===========================
+# Transcription Outputs
+# ===========================
+transcripts/
+*.srt
+*.vtt
+
+# ===========================
+# Jupyter Notebooks
+# ===========================
+.ipynb_checkpoints/
+*.ipynb
+
+# ===========================
+# IDEs & Editors
+# ===========================
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ===========================
+# Streamlit
+# ===========================
+.streamlit/secrets.toml
+
+# ===========================
+# Logs
+# ===========================
+*.log
+logs/
