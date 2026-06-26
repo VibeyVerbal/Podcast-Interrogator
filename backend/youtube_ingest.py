@@ -1,11 +1,8 @@
 """
 Step 1 of the pipeline: Ingest.
-
-Transcript fetching strategy:
-  - Cloud (SUPADATA_API_KEY set): uses Supadata API — bypasses YouTube IP blocks
-  - Local (no key): uses youtube-transcript-api directly
+Takes a YouTube URL (or bare video ID) and returns the auto-generated
+transcript as a list of timed snippets, using youtube-transcript-api.
 """
-import os
 import re
 from dataclasses import dataclass
 from typing import List, Sequence
@@ -26,10 +23,11 @@ _BARE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 
 
 class TranscriptError(Exception):
-    pass
+    """Raised whenever we can't get a usable transcript for a video."""
 
 
 def extract_video_id(url_or_id: str) -> str:
+    """Accepts a full YouTube URL or bare 11-character video ID."""
     candidate = url_or_id.strip()
     if _BARE_ID_RE.match(candidate):
         return candidate
@@ -37,7 +35,8 @@ def extract_video_id(url_or_id: str) -> str:
     if match:
         return match.group(1)
     raise TranscriptError(
-        f"Could not find a YouTube video ID in: {url_or_id!r}."
+        f"Could not find a YouTube video ID in: {url_or_id!r}. "
+        "Pass a full YouTube URL or an 11-character video ID."
     )
 
 
@@ -48,68 +47,38 @@ class TranscriptSnippet:
     duration: float
 
 
-def _fetch_via_supadata(video_id: str) -> List[TranscriptSnippet]:
-    """Use Supadata API — works on any cloud provider, bypasses YouTube blocks."""
-    api_key = os.environ.get("SUPADATA_API_KEY", "").strip()
-
-    resp = requests.get(
-        "https://api.supadata.ai/v1/youtube/transcript",
-        params={"videoId": video_id, "text": "false"},
-        headers={"x-api-key": api_key},
-        timeout=30,
-    )
-
-    if resp.status_code == 401:
-        raise TranscriptError("Supadata: invalid API key. Check SUPADATA_API_KEY in Render.")
-    if resp.status_code == 404:
-        raise TranscriptError(f"No transcript found for '{video_id}' via Supadata.")
-    resp.raise_for_status()
-
-    content = resp.json().get("content", [])
-    if not content:
-        raise TranscriptError(f"Supadata returned empty transcript for '{video_id}'.")
-
-    return [
-        TranscriptSnippet(
-            text=item["text"],
-            start=item["offset"] / 1000,
-            duration=item["duration"] / 1000,
-        )
-        for item in content
-    ]
-
-
-def _fetch_via_yta(video_id: str, languages: Sequence[str]) -> List[TranscriptSnippet]:
-    """Use youtube-transcript-api directly — for local development only."""
+def fetch_transcript(video_id: str, languages: Sequence[str] = ("en",)) -> List[TranscriptSnippet]:
+    """Fetch the transcript for a video.
+    Tries the requested languages first (auto-generated captions included).
+    If none of those are available, falls back to whatever transcript
+    YouTube does offer for the video, so non-English podcasts still work.
+    """
     api = YouTubeTranscriptApi()
     try:
         fetched = api.fetch(video_id, languages=list(languages))
-    except (NoTranscriptFound, TranscriptsDisabled, VideoUnavailable) as e:
+    except (NoTranscriptFound, TranscriptsDisabled, VideoUnavailable) as primary_error:
         try:
             available = api.list(video_id)
             transcript = next(iter(available))
-            fetched = transcript.fetch()
-        except (StopIteration, CouldNotRetrieveTranscript):
-            raise TranscriptError(f"No transcript available for '{video_id}'. ({e})")
+        except (StopIteration, CouldNotRetrieveTranscript) as fallback_error:
+            raise TranscriptError(
+                f"No transcript is available for video '{video_id}'. "
+                f"({primary_error})"
+            ) from fallback_error
+        fetched = transcript.fetch()
     except CouldNotRetrieveTranscript as e:
-        raise TranscriptError(f"Could not retrieve transcript for '{video_id}': {e}")
+        raise TranscriptError(f"Could not retrieve a transcript for '{video_id}': {e}") from e
 
     snippets = [
-        TranscriptSnippet(text=s.text, start=s.start, duration=s.duration)
-        for s in fetched
+        TranscriptSnippet(text=s.text, start=s.start, duration=s.duration) for s in fetched
     ]
     if not snippets:
         raise TranscriptError(f"Transcript for '{video_id}' came back empty.")
     return snippets
 
 
-def fetch_transcript(video_id: str, languages: Sequence[str] = ("en",)) -> List[TranscriptSnippet]:
-    if os.environ.get("SUPADATA_API_KEY"):
-        return _fetch_via_supadata(video_id)
-    return _fetch_via_yta(video_id, languages)
-
-
 def get_video_title(video_id: str) -> str:
+    """Best-effort title via YouTube oEmbed. Falls back to video ID."""
     try:
         resp = requests.get(
             "https://www.youtube.com/oembed",
