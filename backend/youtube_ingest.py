@@ -1,7 +1,12 @@
 """
 Step 1 of the pipeline: Ingest.
-Takes a YouTube URL (or bare video ID) and returns the auto-generated
-transcript as a list of timed snippets, using youtube-transcript-api.
+
+Transcript fetching strategy (in order):
+  1. Supadata API  — cloud-friendly, bypasses YouTube IP blocks (set SUPADATA_API_KEY)
+  2. youtube-transcript-api with proxy  — fallback if proxy creds are set
+  3. youtube-transcript-api direct  — local development only
+
+Set SUPADATA_API_KEY in Render environment variables for cloud deployment.
 """
 import os
 import re
@@ -27,27 +32,8 @@ class TranscriptError(Exception):
     """Raised whenever we can't get a usable transcript for a video."""
 
 
-def _build_api() -> YouTubeTranscriptApi:
-    """
-    Build YouTubeTranscriptApi with a Webshare rotating proxy if credentials
-    are set via environment variables (PROXY_USERNAME / PROXY_PASSWORD).
-    Falls back to a direct connection for local development.
-    """
-    username = os.environ.get("PROXY_USERNAME", "").strip()
-    password = os.environ.get("PROXY_PASSWORD", "").strip()
-
-    if username and password:
-        proxy_url = f"http://{username}:{password}@p.webshare.io:80"
-        proxies = {"http": proxy_url, "https": proxy_url}
-        return YouTubeTranscriptApi(proxies=proxies)
-
-    return YouTubeTranscriptApi()
-
-
 def extract_video_id(url_or_id: str) -> str:
-    """Accepts a full YouTube URL (watch/shorts/live/youtu.be, with or
-    without extra query params) or a bare 11-character video ID, and
-    returns just the video ID."""
+    """Accepts a full YouTube URL or bare 11-character video ID."""
     candidate = url_or_id.strip()
     if _BARE_ID_RE.match(candidate):
         return candidate
@@ -67,15 +53,64 @@ class TranscriptSnippet:
     duration: float
 
 
-def fetch_transcript(video_id: str, languages: Sequence[str] = ("en",)) -> List[TranscriptSnippet]:
-    """Fetch the transcript for a video.
-    Tries the requested languages first (auto-generated captions included).
-    If none of those are available, falls back to whatever transcript
-    YouTube does offer for the video, so non-English podcasts still work.
-    Uses a Webshare proxy on cloud deployments to bypass IP blocks.
-    """
-    api = _build_api()
+# ---------------------------------------------------------------------------
+# Strategy 1 — Supadata (cloud-safe, bypasses YouTube IP blocks)
+# ---------------------------------------------------------------------------
 
+def _fetch_via_supadata(video_id: str) -> List[TranscriptSnippet]:
+    """
+    Use Supadata's YouTube transcript API.
+    Handles YouTube IP blocks transparently — works on any cloud provider.
+    Free tier: 200 requests/month at supadata.ai
+    """
+    api_key = os.environ.get("SUPADATA_API_KEY", "").strip()
+    if not api_key:
+        raise ValueError("SUPADATA_API_KEY not set.")
+
+    resp = requests.get(
+        "https://api.supadata.ai/v1/youtube/transcript",
+        params={"videoId": video_id, "text": "false"},
+        headers={"x-api-key": api_key},
+        timeout=30,
+    )
+
+    if resp.status_code == 404:
+        raise TranscriptError(f"Supadata: no transcript found for '{video_id}'.")
+    if resp.status_code == 401:
+        raise TranscriptError("Supadata: invalid API key. Check SUPADATA_API_KEY in Render.")
+    resp.raise_for_status()
+
+    data = resp.json()
+    content = data.get("content", [])
+
+    if not content:
+        raise TranscriptError(f"Supadata returned an empty transcript for '{video_id}'.")
+
+    return [
+        TranscriptSnippet(
+            text=item["text"],
+            start=item["offset"] / 1000,    # ms → seconds
+            duration=item["duration"] / 1000,
+        )
+        for item in content
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Strategy 2 & 3 — youtube-transcript-api (with or without proxy)
+# ---------------------------------------------------------------------------
+
+def _build_api() -> YouTubeTranscriptApi:
+    username = os.environ.get("PROXY_USERNAME", "").strip()
+    password = os.environ.get("PROXY_PASSWORD", "").strip()
+    if username and password:
+        proxy_url = f"http://{username}:{password}@p.webshare.io:80"
+        return YouTubeTranscriptApi(proxies={"http": proxy_url, "https": proxy_url})
+    return YouTubeTranscriptApi()
+
+
+def _fetch_via_yta(video_id: str, languages: Sequence[str]) -> List[TranscriptSnippet]:
+    api = _build_api()
     try:
         fetched = api.fetch(video_id, languages=list(languages))
     except (NoTranscriptFound, TranscriptsDisabled, VideoUnavailable) as primary_error:
@@ -84,25 +119,49 @@ def fetch_transcript(video_id: str, languages: Sequence[str] = ("en",)) -> List[
             transcript = next(iter(available))
         except (StopIteration, CouldNotRetrieveTranscript) as fallback_error:
             raise TranscriptError(
-                f"No transcript is available for video '{video_id}'. "
-                f"({primary_error})"
+                f"No transcript available for '{video_id}'. ({primary_error})"
             ) from fallback_error
         fetched = transcript.fetch()
     except CouldNotRetrieveTranscript as e:
-        raise TranscriptError(f"Could not retrieve a transcript for '{video_id}': {e}") from e
+        raise TranscriptError(f"Could not retrieve transcript for '{video_id}': {e}") from e
 
     snippets = [
-        TranscriptSnippet(text=s.text, start=s.start, duration=s.duration) for s in fetched
+        TranscriptSnippet(text=s.text, start=s.start, duration=s.duration)
+        for s in fetched
     ]
     if not snippets:
         raise TranscriptError(f"Transcript for '{video_id}' came back empty.")
     return snippets
 
 
+# ---------------------------------------------------------------------------
+# Public entry point — tries all strategies in order
+# ---------------------------------------------------------------------------
+
+def fetch_transcript(video_id: str, languages: Sequence[str] = ("en",)) -> List[TranscriptSnippet]:
+    """
+    Fetch transcript using the best available method.
+    Priority: Supadata → youtube-transcript-api (proxy) → youtube-transcript-api (direct)
+    """
+    # Strategy 1: Supadata (recommended for cloud)
+    if os.environ.get("SUPADATA_API_KEY"):
+        try:
+            return _fetch_via_supadata(video_id)
+        except TranscriptError:
+            raise   # Surface Supadata-specific errors (no transcript, bad key)
+        except Exception:
+            pass    # Network issue — fall through to next strategy
+
+    # Strategy 2 & 3: youtube-transcript-api
+    return _fetch_via_yta(video_id, languages)
+
+
+# ---------------------------------------------------------------------------
+# Video title
+# ---------------------------------------------------------------------------
+
 def get_video_title(video_id: str) -> str:
-    """Best-effort video title lookup via YouTube's public oEmbed endpoint
-    (no API key required). Falls back to the video ID if it can't be
-    reached, so this never blocks ingestion."""
+    """Best-effort title via YouTube oEmbed. Falls back to video ID."""
     try:
         resp = requests.get(
             "https://www.youtube.com/oembed",
