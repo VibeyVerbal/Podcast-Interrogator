@@ -1,5 +1,5 @@
 # --- Existing deps (your interrogator already uses these) ---
-google-generativeai
+google-genai
 chromadb
 youtube-transcript-api
 pytube
