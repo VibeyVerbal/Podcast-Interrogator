@@ -1,0 +1,10 @@
+# --- Existing deps (your interrogator already uses these) ---
+google-generativeai
+chromadb
+youtube-transcript-api
+pytube
+
+# --- New deps for the API layer ---
+fastapi
+uvicorn[standard]
+python-dotenv
