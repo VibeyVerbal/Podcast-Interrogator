@@ -1,10 +1,13 @@
-# --- Existing deps (your interrogator already uses these) ---
+# Core
 google-genai
 chromadb
 youtube-transcript-api
 pytube
 
-# --- New deps for the API layer ---
+# API layer
 fastapi
 uvicorn[standard]
 python-dotenv
+
+# Security
+slowapi
