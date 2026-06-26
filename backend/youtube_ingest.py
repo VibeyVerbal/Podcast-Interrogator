@@ -1,10 +1,9 @@
 """
 Step 1 of the pipeline: Ingest.
-
 Takes a YouTube URL (or bare video ID) and returns the auto-generated
 transcript as a list of timed snippets, using youtube-transcript-api.
 """
-
+import os
 import re
 from dataclasses import dataclass
 from typing import List, Sequence
@@ -28,19 +27,33 @@ class TranscriptError(Exception):
     """Raised whenever we can't get a usable transcript for a video."""
 
 
+def _build_api() -> YouTubeTranscriptApi:
+    """
+    Build YouTubeTranscriptApi with a Webshare rotating proxy if credentials
+    are set via environment variables (PROXY_USERNAME / PROXY_PASSWORD).
+    Falls back to a direct connection for local development.
+    """
+    username = os.environ.get("PROXY_USERNAME", "").strip()
+    password = os.environ.get("PROXY_PASSWORD", "").strip()
+
+    if username and password:
+        proxy_url = f"http://{username}:{password}@p.webshare.io:80"
+        proxies = {"http": proxy_url, "https": proxy_url}
+        return YouTubeTranscriptApi(proxies=proxies)
+
+    return YouTubeTranscriptApi()
+
+
 def extract_video_id(url_or_id: str) -> str:
     """Accepts a full YouTube URL (watch/shorts/live/youtu.be, with or
     without extra query params) or a bare 11-character video ID, and
     returns just the video ID."""
     candidate = url_or_id.strip()
-
     if _BARE_ID_RE.match(candidate):
         return candidate
-
     match = _VIDEO_ID_RE.search(candidate)
     if match:
         return match.group(1)
-
     raise TranscriptError(
         f"Could not find a YouTube video ID in: {url_or_id!r}. "
         "Pass a full YouTube URL or an 11-character video ID."
@@ -56,12 +69,12 @@ class TranscriptSnippet:
 
 def fetch_transcript(video_id: str, languages: Sequence[str] = ("en",)) -> List[TranscriptSnippet]:
     """Fetch the transcript for a video.
-
     Tries the requested languages first (auto-generated captions included).
     If none of those are available, falls back to whatever transcript
     YouTube does offer for the video, so non-English podcasts still work.
+    Uses a Webshare proxy on cloud deployments to bypass IP blocks.
     """
-    api = YouTubeTranscriptApi()
+    api = _build_api()
 
     try:
         fetched = api.fetch(video_id, languages=list(languages))
